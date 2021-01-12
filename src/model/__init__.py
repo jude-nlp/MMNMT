@@ -157,51 +157,6 @@ def build_model(params, dico):
             return model.cuda(),  proj.cuda()  # update
         else:
             return model.cuda(), proj
-    elif params.double_encoder:
-        # build
-        xlm_enc =  TransformerModel(params, dico, is_encoder=True, with_output=True)
-        encoder = TransformerModel(params, dico, is_encoder=True, with_output=False)  # TODO: only output when necessary - len(params.clm_steps + params.mlm_steps) > 0
-        decoder = TransformerModel(params, dico, is_encoder=False, with_output=True)
-        # reload a pretrained model
-        if params.reload_model != '':
-            enc_path, dec_path = params.reload_model.split(',')
-            assert not (enc_path == '' and dec_path == '')
-
-            # reload xlm
-            if enc_path != '':
-                logger.info("Reloading encoder from %s ..." % enc_path)
-                enc_reload = torch.load(enc_path, map_location=lambda storage, loc: storage.cuda(params.local_rank))
-                enc_reload = enc_reload['model' if 'model' in enc_reload else 'encoder']
-                if all([k.startswith('module.') for k in enc_reload.keys()]):
-                    enc_reload = {k[len('module.'):]: v for k, v in enc_reload.items()}
-
-                xlm_enc.load_state_dict(enc_reload)
-
-            # reload decoder
-            if dec_path != '':
-                logger.info("Reloading decoder from %s ..." % dec_path)
-                dec_reload = torch.load(dec_path, map_location=lambda storage, loc: storage.cuda(params.local_rank))
-                dec_reload = dec_reload['model' if 'model' in dec_reload else 'decoder']
-                if all([k.startswith('module.') for k in dec_reload.keys()]):
-                    dec_reload = {k[len('module.'):]: v for k, v in dec_reload.items()}
-                
-                for i in range(params.n_layers):
-                    for name in DECODER_ONLY_PARAMS:
-                        if name % i not in dec_reload:
-                            logger.warning("Parameter %s not found." % (name % i))
-                            dec_reload[name % i] = decoder.state_dict()[name % i]
-
-                decoder.load_state_dict(dec_reload)
-
-
-        # 冻结 xlm 参数
-        for k, p in xlm_enc.named_parameters():
-            p.requires_grad = False
-        logger.info("after set xlm_enc requires_grad to False")
-        for k, p in xlm_enc.named_parameters():
-            logger.info("%s:%s" % (k, p.requires_grad))
-
-        return xlm_enc.cuda(), encoder.cuda(), decoder.cuda()
     else:
         # build
         encoder = TransformerModel(params, dico, is_encoder=True, with_output=True)  # TODO: only output when necessary - len(params.clm_steps + params.mlm_steps) > 0
@@ -237,16 +192,6 @@ def build_model(params, dico):
                 enc_reload = enc_reload['model' if 'model' in enc_reload else 'encoder']
                 if all([k.startswith('module.') for k in enc_reload.keys()]):
                     enc_reload = {k[len('module.'):]: v for k, v in enc_reload.items()}
-                
-                # If lhuc Parameters not found  update 9/13
-                '''
-                if params.lhuc_encoder:
-                    lhuc = 'lhucs.%i.weight'
-                    for i in range(params.n_layers):
-                        if lhuc % i not in enc_reload:
-                            logger.warning("Parameter %s not found." % (lhuc % i))
-                            enc_reload[lhuc % i] = encoder.state_dict()[lhuc % i]
-                '''
 
                 # enc_reload.pop('pred_layer.proj.weight')
                 # enc_reload.pop('pred_layer.proj.bias')
@@ -254,6 +199,17 @@ def build_model(params, dico):
                 # enc_reload['lang_embeddings.weight'] = encoder.state_dict()['lang_embeddings.weight']
                 # enc_reload['pred_layer.proj.weight'] = encoder.state_dict()['pred_layer.proj.weight']   # 我之前训练的de-en，是没有这个层的，但是现在XLM我又用到了，所以添加上，并且随机初始化
                 # enc_reload['pred_layer.proj.bias'] = encoder.state_dict()['pred_layer.proj.bias']   # update
+                layer_6 = {}    # 0-6层，第6层
+                for k, v in enc_reload.items():
+                    k_list = k.split('.')
+                    # 用第5层的参数去初始化第6层
+                    if len(k_list[1]) == 1 and int(k_list[1]) == 5:
+                        k_list[1] = "6"
+                        key_6 = '.'.join(k_list)
+                        logger.info("new_key:%s" % key_6)
+                        layer_6[key_6] = v
+                for k, v in layer_6.items():
+                    enc_reload[k] = v
 
                 encoder.load_state_dict(enc_reload)
 
@@ -272,15 +228,17 @@ def build_model(params, dico):
 
                 # 这里为了修复torch.Size([2, 1024]) from checkpoint, the shape in current model is torch.Size([3, 1024]) bug
                 # dec_reload['lang_embeddings.weight'] = decoder.state_dict()['lang_embeddings.weight']
-                                # If lhuc Parameters not found  update 9/13
-                '''
-                if params.lhuc_decoder:
-                    lhuc = 'lhucs.%i.weight' # update 9/13
-                    for i in range(params.n_layers):
-                        if lhuc % i not in dec_reload:
-                            logger.warning("Parameter %s not found." % (lhuc % i))
-                            dec_reload[lhuc % i] = decoder.state_dict()[lhuc % i]
-                '''
+                layer_6 = {}    # 0-6层，第6层
+                for k, v in dec_reload.items():
+                    k_list = k.split('.')
+                    # 用第5层的参数去初始化第6层
+                    if len(k_list[1]) == 1 and int(k_list[1]) == 5:
+                        k_list[1] = "6"
+                        key_6 = '.'.join(k_list)
+                        logger.info("new_key:%s" % key_6)
+                        layer_6[key_6] = v
+                for k, v in layer_6.items():
+                    dec_reload[k] = v
 
                 decoder.load_state_dict(dec_reload)
 
@@ -310,35 +268,6 @@ def build_model(params, dico):
                 if len(split[1]) == 1 and int(split[1]) < params.freeze_decoder_layer_num:
                     p.requires_grad = False
             logger.info("after set decoder requires_grad to False")
-            for k, p in decoder.named_parameters():
-                logger.info("%s:%s" % (k, p.requires_grad))
-        # lhuc 冻结所有参数
-        if params.lhuc_encoder:
-            # Encoder
-            for k, p in encoder.named_parameters():
-                # logger.info("%s:%s" % (k, p.requires_grad))
-                split = k.split('.')
-                # if split[0] == 'position_embeddings' or split[0] == 'lang_embeddings' or split[0] == 'embeddings' or split[0] == 'layer_norm_emb': # 冻结Embedding层
-                    # p.requires_grad = False
-                    # continue
-                # if split[0] != 'lhucs1' and split[0] != 'lhucs2':
-                if split[0] != 'lhucs2':
-                    p.requires_grad = False
-            logger.info("after set Encoder requires_grad to False")
-            for k, p in encoder.named_parameters():
-                logger.info("%s:%s" % (k, p.requires_grad))
-
-            # decoder
-            for k, p in decoder.named_parameters():
-                # logger.info("%s:%s" % (k, p.requires_grad))
-                split = k.split('.')
-                # if split[0] == 'position_embeddings' or split[0] == 'lang_embeddings' or split[0] == 'embeddings' or split[0] == 'layer_norm_emb': # 冻结Embedding层
-                    # p.requires_grad = False
-                    # continue
-                # if split[0] != 'lhucs1' and split[0] != 'lhucs2' and split[0] != 'lhucs15':
-                if split[0] != 'lhucs2':
-                    p.requires_grad = False
-            logger.info("after set Decoder requires_grad to False")
             for k, p in decoder.named_parameters():
                 logger.info("%s:%s" % (k, p.requires_grad))
 

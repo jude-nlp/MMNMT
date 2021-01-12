@@ -145,22 +145,6 @@ class PredLayer(nn.Module):
         assert x.dim() == 2
         return self.proj.log_prob(x) if self.asm else self.proj(x)
 
-# update 9/13
-class LHUCLayer(nn.Module):
-    """
-    Learning Hidden Unit Contributions
-    """
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-        w = torch.Tensor(self.dim, 1)
-        torch.nn.init.xavier_uniform_(w)
-        self.weight = torch.nn.Parameter(w.squeeze(-1))
-    
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        weight = 2 * torch.sigmoid(self.weight)
-        return weight.mul(input)
-
 
 class MultiHeadAttention(nn.Module):
 
@@ -263,14 +247,11 @@ class TransformerModel(nn.Module):
         super().__init__()
         self.params = params # update 8-21
 
-        # encoder / decoder, output layer, lhuc
+        # encoder / decoder, output layer, adapter
         self.is_encoder = is_encoder
         self.is_decoder = not is_encoder
         self.with_output = with_output
-        if (self.is_encoder and self.params.lhuc_encoder) or (self.is_decoder and self.params.lhuc_decoder):    # update 9/13
-            self.with_lhuc = True
-        else:
-            self.with_lhuc = False
+        self.with_adapter = params.with_adapter
 
         # dictionary / languages
         self.n_langs = params.n_langs
@@ -310,10 +291,6 @@ class TransformerModel(nn.Module):
         if self.is_decoder:
             self.layer_norm15 = nn.ModuleList()
             self.encoder_attn = nn.ModuleList()
-        if self.with_lhuc:
-            # self.lhucs1 = nn.ModuleList()    # update 2020/9/13
-            self.lhucs2 = nn.ModuleList()    # update 2020/9/13
-            # self.lhucs15 = nn.ModuleList()    # update 2020/9/13
 
         # memories
         self.memories = nn.ModuleDict()
@@ -323,24 +300,23 @@ class TransformerModel(nn.Module):
                 assert 0 <= layer_id <= params.n_layers - 1
                 assert pos in ['in', 'after']
                 self.memories['%i_%s' % (layer_id, pos)] = HashingMemory.build(self.dim, self.dim, params)
+        if self.with_adapter:
+            self.n_layers = 7   # 最后一层作为 Adapter
 
         for layer_id in range(self.n_layers):
             self.attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
             self.layer_norm1.append(nn.LayerNorm(self.dim, eps=1e-12))
-            # if self.with_lhuc:
-                # self.lhucs1.append(LHUCLayer(self.dim))
+
             if self.is_decoder:
                 self.layer_norm15.append(nn.LayerNorm(self.dim, eps=1e-12))
                 self.encoder_attn.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
-                # if self.with_lhuc:
-                    # self.lhucs15.append(LHUCLayer(self.dim))
+
             if ('%i_in' % layer_id) in self.memories:
                 self.ffns.append(None)
             else:
                 self.ffns.append(TransformerFFN(self.dim, self.hidden_dim, self.dim, dropout=self.dropout, gelu_activation=params.gelu_activation))
             self.layer_norm2.append(nn.LayerNorm(self.dim, eps=1e-12))
-            if self.with_lhuc:
-                self.lhucs2.append(LHUCLayer(self.dim))
+
 
         # output layer
         if self.with_output:
@@ -435,19 +411,12 @@ class TransformerModel(nn.Module):
             tensor = tensor + attn
             tensor = self.layer_norm1[i](tensor)
 
-            # LHUC 1
-            # if self.with_lhuc:                              # update 9/13
-                # tensor = self.lhucs1[i](tensor)
-
             # encoder attention (for decoder only)
             if self.is_decoder and src_enc is not None:
                 attn = self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache)
                 attn = F.dropout(attn, p=self.dropout, training=self.training)
                 tensor = tensor + attn
                 tensor = self.layer_norm15[i](tensor)
-                # LHUC 15
-                # if self.with_lhuc:                              # update 9/13
-                    # tensor = self.lhucs15[i](tensor)
 
             # FFN
             if ('%i_in' % i) in self.memories:
@@ -460,9 +429,6 @@ class TransformerModel(nn.Module):
             if ('%i_after' % i) in self.memories:
                 tensor = tensor + self.memories['%i_after' % i](tensor)
             # TODO: add extra layer norm here?
-
-            if self.with_lhuc:                              # update 9/13
-                tensor = self.lhucs2[i](tensor)
 
             tensor *= mask.unsqueeze(-1).to(tensor.dtype)
 

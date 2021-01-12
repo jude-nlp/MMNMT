@@ -254,6 +254,12 @@ def get_parser():
     parser.add_argument("--gmm_steps", type=str, default="",
                     help="GMM cluster")
 
+    # update 2021/1/6
+    parser.add_argument("--with_adapter", type=bool, default=False,
+                help="Simple Scalable Adaptation for Neural Machine Translation")
+    parser.add_argument("--bottleneck_dim", type=int, default=256,
+            help="bottleneck layer dim in transformer adapater")
+
     return parser
 
 

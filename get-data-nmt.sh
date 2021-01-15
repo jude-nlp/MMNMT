@@ -30,6 +30,8 @@ case $key in
     RELOAD_CODES="$2"; shift 2;;
   --reload_vocab)
     RELOAD_VOCAB="$2"; shift 2;;
+  --prep)
+    PREP="$2"; shift 2;;
   *)
   POSITIONAL+=("$1")
   shift
@@ -50,7 +52,7 @@ if [ "$SRC" == "$TGT" ]; then echo "source and target cannot be identical"; exit
 if [ "$RELOAD_CODES" != "" ] && [ ! -f "$RELOAD_CODES" ]; then echo "cannot locate BPE codes"; exit; fi
 if [ "$RELOAD_VOCAB" != "" ] && [ ! -f "$RELOAD_VOCAB" ]; then echo "cannot locate vocabulary"; exit; fi
 if [ "$RELOAD_CODES" == "" -a "$RELOAD_VOCAB" != "" -o "$RELOAD_CODES" != "" -a "$RELOAD_VOCAB" == "" ]; then echo "BPE codes should be provided if and only if vocabulary is also provided"; exit; fi
-
+if [ "$PREP" == "" ]; then echo "--prep not provided"; exit; fi
 
 #
 # Initialize tools and data paths
@@ -60,16 +62,13 @@ if [ "$RELOAD_CODES" == "" -a "$RELOAD_VOCAB" != "" -o "$RELOAD_CODES" != "" -a 
 MAIN_PATH=$PWD
 TOOLS_PATH=$PWD/tools
 DATA_PATH=$PWD/data
-MONO_PATH=$DATA_PATH/mono
-PARA_PATH=$DATA_PATH/para
 PROC_PATH=$DATA_PATH/processed/$SRC-$TGT
+TMP=$PREP/tmp
 
 # create paths
 mkdir -p $TOOLS_PATH
-mkdir -p $DATA_PATH
-mkdir -p $MONO_PATH
-mkdir -p $PARA_PATH
 mkdir -p $PROC_PATH
+mkdir -p $TMP
 
 # moses
 MOSES=$TOOLS_PATH/mosesdecoder
@@ -101,51 +100,23 @@ PARA_TGT_TEST_BPE=$PROC_PATH/test.$SRC-$TGT.$TGT
 # valid / test file raw data
 unset PARA_SRC_TRAIN PARA_TGT_TRAIN PARA_SRC_VALID PARA_TGT_VALID PARA_SRC_TEST PARA_TGT_TEST    # Update
 
-if [ "$SRC" == "de" -a "$TGT" == "en" ]; then
-  PARA_SRC_TRAIN_RAW=$PARA_PATH/train/raw/de-en-wmt14/train-raw.de  # Update  这是未经处理的数据
-  PARA_TGT_TRAIN_RAW=$PARA_PATH/train/raw/de-en-wmt14/train-raw.en  # Update
-  PARA_SRC_VALID_RAW=$PARA_PATH/dev/raw/valid-raw.de  # Update
-  PARA_TGT_VALID_RAW=$PARA_PATH/dev/raw/valid-raw.en  # Update
-  PARA_SRC_TEST_RAW=$PARA_PATH/dev/raw/test-raw.de  # Update
-  PARA_TGT_TEST_RAW=$PARA_PATH/dev/raw/test-raw.en  # Update
+PARA_SRC_TRAIN_RAW=$PREP/train.$SRC
+PARA_TGT_TRAIN_RAW=$PREP/train.$TGT 
+PARA_SRC_VALID_RAW=$PREP/valid.$SRC
+PARA_TGT_VALID_RAW=$PREP/valid.$TGT
+PARA_SRC_TEST_RAW=$PREP/test.$SRC
+PARA_TGT_TEST_RAW=$PREP/test.$TGT
 
-  PARA_SRC_TRAIN=$PARA_PATH/train/raw/de-en-wmt14/train.de  # Update
-  PARA_TGT_TRAIN=$PARA_PATH/train/raw/de-en-wmt14/train.en  # Update
-  PARA_SRC_VALID=$PARA_PATH/dev/valid.de  # 用德语和英语来做验证集和测试集，所以不写de-en，不必要与fr-en区别开，因为没有fr-en的验证集
-  PARA_TGT_VALID=$PARA_PATH/dev/valid.en
-  PARA_SRC_TEST=$PARA_PATH/dev/test.de
-  PARA_TGT_TEST=$PARA_PATH/dev/test.en
-fi
+PARA_SRC_TRAIN=$TMP/train.$SRC.tok
+PARA_TGT_TRAIN=$TMP/train.$TGT.tok 
+PARA_SRC_VALID=$TMP/valid.$SRC.tok
+PARA_TGT_VALID=$TMP/valid.$TGT.tok
+PARA_SRC_TEST=$TMP/test.$SRC.tok
+PARA_TGT_TEST=$TMP/test.$TGT.tok
 
-if [ "$SRC" == "en" -a "$TGT" == "fr" ]; then
-  PARA_SRC_TRAIN_RAW=$PARA_PATH/train/raw/fr-en-wmt14/train-raw.en  # Update  这是未经处理的数据
-  PARA_TGT_TRAIN_RAW=$PARA_PATH/train/raw/fr-en-wmt14/train-raw.fr  # Update
-  PARA_SRC_VALID_RAW=$PARA_PATH/train/raw/fr-en-wmt14/valid-raw.en  # Update
-  PARA_TGT_VALID_RAW=$PARA_PATH/train/raw/fr-en-wmt14/valid-raw.fr  # Update
-  PARA_SRC_TEST_RAW=$PARA_PATH/train/raw/fr-en-wmt14/test-raw.en  # Update
-  PARA_TGT_TEST_RAW=$PARA_PATH/train/raw/fr-en-wmt14/test-raw.fr  # Update
-
-  PARA_SRC_TRAIN=$PARA_PATH/train/raw/fr-en-wmt14/train.en  # Update
-  PARA_TGT_TRAIN=$PARA_PATH/train/raw/fr-en-wmt14/train.fr  # Update
-  PARA_SRC_VALID=$PARA_PATH/train/raw/fr-en-wmt14/valid.en
-  PARA_TGT_VALID=$PARA_PATH/train/raw/fr-en-wmt14/valid.fr
-  PARA_SRC_TEST=$PARA_PATH/train/raw/fr-en-wmt14/test.en
-  PARA_TGT_TEST=$PARA_PATH/train/raw/fr-en-wmt14/test.fr
-fi
 # preprocessing commands - special case for Romanian
-if [ "$SRC" == "ro" ]; then
-  SRC_PREPROCESSING="$REPLACE_UNICODE_PUNCT | $NORM_PUNC -l $SRC | $REM_NON_PRINT_CHAR | $NORMALIZE_ROMANIAN | $REMOVE_DIACRITICS | $TOKENIZER -l $SRC -no-escape -threads $N_THREADS"
-else
-  SRC_PREPROCESSING="$REPLACE_UNICODE_PUNCT | $NORM_PUNC -l $SRC | $REM_NON_PRINT_CHAR |                                            $TOKENIZER -l $SRC -no-escape -threads $N_THREADS"
-fi
-if [ "$TGT" == "ro" ]; then
-  TGT_PREPROCESSING="$REPLACE_UNICODE_PUNCT | $NORM_PUNC -l $TGT | $REM_NON_PRINT_CHAR | $NORMALIZE_ROMANIAN | $REMOVE_DIACRITICS | $TOKENIZER -l $TGT -no-escape -threads $N_THREADS"
-else
-  TGT_PREPROCESSING="$REPLACE_UNICODE_PUNCT | $NORM_PUNC -l $TGT | $REM_NON_PRINT_CHAR |                                            $TOKENIZER -l $TGT -no-escape -threads $N_THREADS"
-fi
-
-# cd $PARA_PATH
-
+SRC_PREPROCESSING="$REPLACE_UNICODE_PUNCT | $NORM_PUNC -l $SRC | $REM_NON_PRINT_CHAR | $TOKENIZER -l $SRC -no-escape -threads $N_THREADS"
+TGT_PREPROCESSING="$REPLACE_UNICODE_PUNCT | $NORM_PUNC -l $TGT | $REM_NON_PRINT_CHAR | $TOKENIZER -l $TGT -no-escape -threads $N_THREADS"
 
 # check valid and test files are here
 if ! [[ -f "$PARA_SRC_TRAIN_RAW" ]]; then echo "$PARA_SRC_TRAIN_RAW is not found!"; exit; fi

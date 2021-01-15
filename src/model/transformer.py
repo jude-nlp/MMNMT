@@ -405,6 +405,8 @@ class TransformerModel(nn.Module):
         # transformer layers
         for i in range(self.n_layers):
 
+            if self.with_adapter and i == self.n_layers - 1:
+                residual = tensor
             # self attention
             attn = self.attentions[i](tensor, attn_mask, cache=cache)
             attn = F.dropout(attn, p=self.dropout, training=self.training)
@@ -431,6 +433,9 @@ class TransformerModel(nn.Module):
             # TODO: add extra layer norm here?
 
             tensor *= mask.unsqueeze(-1).to(tensor.dtype)
+
+            if self.with_adapter and i == self.n_layers - 1:
+                tensor = tensor + residual
 
             layer_tensors.append(tensor.transpose(0, 1))    # update 8-21
 
@@ -631,8 +636,6 @@ class TransformerModel(nn.Module):
             next_scores, next_words = torch.topk(_scores, 2 * beam_size, dim=1, largest=True, sorted=True)  # why 2 * beam_size
             assert next_scores.size() == next_words.size() == (bs, 2 * beam_size)
 
-            logger.info("next_scores: %s" % str(next_scores))
-            logger.info("next_words: %s" % str(next_words))
 
             # next batch beam content
             # list of (bs * beam_size) tuple(next hypothesis score, next word, current position in the batch)
@@ -666,9 +669,6 @@ class TransformerModel(nn.Module):
                     # the beam for next step is full
                     if len(next_sent_beam) == beam_size:
                         break
-                # logger.info("next_sent_beam:%s" % str(next_sent_beam))
-                # import sys
-                # sys.exit()
                 
                 # update next beam content
                 assert len(next_sent_beam) == 0 if cur_len + 1 == max_len else beam_size
@@ -683,22 +683,12 @@ class TransformerModel(nn.Module):
             beam_words = generated.new([x[1] for x in next_batch_beam])
             beam_idx = src_len.new([x[2] for x in next_batch_beam]) # 每一句话占beam_size的长度，如第一句话[0:beam_size] 第二句话[beam_size:2*beam_size]
 
-            logger.info("beam_scores:%s" % str(beam_scores))
-            logger.info("beam_words:%s" % str(beam_words))
-            logger.info("beam_idx:%s" % str(beam_idx))
-
             # re-order batch and internal states
-            logger.info("Before generated:%s" % str(generated))
             generated = generated[:, beam_idx]
-            logger.info("After generated[:, beam_idx]:%s" % str(generated))
             generated[cur_len] = beam_words
-            logger.info("After generated[cur_len] = beam_words:%s" % str(generated))
             for k in cache.keys():
                 if k != 'slen':
                     cache[k] = (cache[k][0][beam_idx], cache[k][1][beam_idx])
-            logger.info("cache:%s" % str(cache.items()))
-            import sys
-            sys.exit()
             # update current length
             cur_len = cur_len + 1
 

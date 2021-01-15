@@ -199,17 +199,18 @@ def build_model(params, dico):
                 # enc_reload['lang_embeddings.weight'] = encoder.state_dict()['lang_embeddings.weight']
                 # enc_reload['pred_layer.proj.weight'] = encoder.state_dict()['pred_layer.proj.weight']   # 我之前训练的de-en，是没有这个层的，但是现在XLM我又用到了，所以添加上，并且随机初始化
                 # enc_reload['pred_layer.proj.bias'] = encoder.state_dict()['pred_layer.proj.bias']   # update
-                layer_6 = {}    # 0-6层，第6层
-                for k, v in enc_reload.items():
-                    k_list = k.split('.')
-                    # 用第5层的参数去初始化第6层
-                    if len(k_list[1]) == 1 and int(k_list[1]) == 5:
-                        k_list[1] = "6"
-                        key_6 = '.'.join(k_list)
-                        logger.info("new_key:%s" % key_6)
-                        layer_6[key_6] = v
-                for k, v in layer_6.items():
-                    enc_reload[k] = v
+                if params.with_adapter:
+                    layer_6 = {}    # 0-6层，第6层
+                    for k, v in enc_reload.items():
+                        k_list = k.split('.')
+                        # 用第5层的参数去初始化第6层
+                        if len(k_list[1]) == 1 and int(k_list[1]) == 5:
+                            k_list[1] = "6"
+                            key_6 = '.'.join(k_list)
+                            logger.info("new_key:%s" % key_6)
+                            layer_6[key_6] = v
+                    for k, v in layer_6.items():
+                        enc_reload[k] = v
 
                 encoder.load_state_dict(enc_reload)
 
@@ -228,17 +229,18 @@ def build_model(params, dico):
 
                 # 这里为了修复torch.Size([2, 1024]) from checkpoint, the shape in current model is torch.Size([3, 1024]) bug
                 # dec_reload['lang_embeddings.weight'] = decoder.state_dict()['lang_embeddings.weight']
-                layer_6 = {}    # 0-6层，第6层
-                for k, v in dec_reload.items():
-                    k_list = k.split('.')
-                    # 用第5层的参数去初始化第6层
-                    if len(k_list[1]) == 1 and int(k_list[1]) == 5:
-                        k_list[1] = "6"
-                        key_6 = '.'.join(k_list)
-                        logger.info("new_key:%s" % key_6)
-                        layer_6[key_6] = v
-                for k, v in layer_6.items():
-                    dec_reload[k] = v
+                if params.with_adapter:
+                    layer_6 = {}    # 0-6层，第6层
+                    for k, v in dec_reload.items():
+                        k_list = k.split('.')
+                        # 用第5层的参数去初始化第6层
+                        if len(k_list[1]) == 1 and int(k_list[1]) == 5:
+                            k_list[1] = "6"
+                            key_6 = '.'.join(k_list)
+                            logger.info("new_key:%s" % key_6)
+                            layer_6[key_6] = v
+                    for k, v in layer_6.items():
+                        dec_reload[k] = v
 
                 decoder.load_state_dict(dec_reload)
 

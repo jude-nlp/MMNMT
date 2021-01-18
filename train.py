@@ -240,12 +240,6 @@ def get_parser():
     parser.add_argument("--get_layer_tensors", type=bool_flag, default=False,
                         help="get_layer_tensors")
 
-    # update 9-11   lhuc
-    parser.add_argument("--lhuc_encoder", type=bool_flag, default=False,
-                    help="learning encoder hidden unit contributions")
-    parser.add_argument("--lhuc_decoder", type=bool_flag, default=False,
-                        help="learning decoder hidden unit contributions")
-
     # update 10-2  double encoder
     parser.add_argument("--double_encoder", type=bool_flag, default=False,
                     help="Using the output of XLM as the input of MT encoder.")
@@ -260,6 +254,13 @@ def get_parser():
     parser.add_argument("--bottleneck_dim", type=int, default=256,
             help="bottleneck layer dim in transformer adapater")
 
+    # domain discriminator
+    parser.add_argument("--with_disc", type=bool, default=False,
+                help="domain discriminator")
+    parser.add_argument("--disc_dim", type=int, default=256,
+                help="domain discriminator hidden dim")
+    parser.add_argument("--n_classes", type=int, default=2,
+                help="classes to classify")
     return parser
 
 
@@ -276,7 +277,7 @@ def main(params):
 
     # load data
     data = load_data(params)
-
+    logger.info(data['dico'].items())
     # build model
     if params.encoder_only:
         model, proj = build_model(params, data['dico'])
@@ -296,7 +297,7 @@ def main(params):
         trainer = EncDecTrainer(encoder, decoder, proj, data, params)
         evaluator = EncDecEvaluator(trainer, data, params)
     
-# evaluation
+    # evaluation
     if params.eval_only:
         scores = evaluator.run_all_evals(trainer)
         for k, v in scores.items():

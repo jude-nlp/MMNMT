@@ -116,15 +116,6 @@ def build_model(params, dico):
         # build
         model = TransformerModel(params, dico, is_encoder=True, with_output=True)
 
-        # update 8/5 为了实现 XLM-disc
-        if params.disc_step:
-            proj = torch.nn.Sequential(*[     # update
-            torch.nn.Dropout(params.dropout),
-            torch.nn.Linear(model.dim, 2)
-            ])
-        else:
-            proj = None
-
         # reload pretrained word embeddings
         if params.reload_emb != '':
             word2id, embeddings = load_embeddings(params.reload_emb, params)
@@ -134,45 +125,20 @@ def build_model(params, dico):
         if params.reload_model != '':
             logger.info("Reloading model from %s ..." % params.reload_model)
             # reloaded = torch.load(params.reload_model, map_location=lambda storage, loc: storage.cuda(params.local_rank))['model']
-            reloaded = torch.load(params.reload_model, map_location=lambda storage, loc: storage.cuda(params.local_rank))['encoder']
+            reloaded = torch.load(params.reload_model, map_location=lambda storage, loc: storage.cuda(params.local_rank))['model']
             if all([k.startswith('module.') for k in reloaded.keys()]):
                 reloaded = {k[len('module.'):]: v for k, v in reloaded.items()}
-            # reloaded['pred_layer.proj.weight'] = model.state_dict()['pred_layer.proj.weight']
-            # reloaded['pred_layer.proj.bias'] = model.state_dict()['pred_layer.proj.bias']
-
-            # # HACK to reload models with less layers
-            # for i in range(12, 24):
-            #     for k in TRANSFORMER_LAYER_PARAMS:
-            #         k = k % i
-            #         if k in model.state_dict() and k not in reloaded:
-            #             logger.warning("Parameter %s not found. Ignoring ..." % k)
-            #             reloaded[k] = model.state_dict()[k]
 
             model.load_state_dict(reloaded)
 
         logger.info("Model: {}".format(model))
         logger.info("Number of parameters (model): %i" % sum([p.numel() for p in model.parameters() if p.requires_grad]))
 
-        if params.disc_step:
-            return model.cuda(),  proj.cuda()  # update
-        else:
-            return model.cuda(), proj
+        return model.cuda()
     else:
         # build
         encoder = TransformerModel(params, dico, is_encoder=True, with_output=True)  # TODO: only output when necessary - len(params.clm_steps + params.mlm_steps) > 0
         decoder = TransformerModel(params, dico, is_encoder=False, with_output=True)
-
-        if params.disc_step:
-            proj = torch.nn.Sequential(*[     # update
-            torch.nn.Dropout(params.dropout),
-            torch.nn.Linear(encoder.dim, 2048),
-            # torch.nn.LeakyReLU(0.1),
-            # torch.nn.Linear(2048, 2048),
-            torch.nn.LeakyReLU(0.1),
-            torch.nn.Linear(2048, 2)
-            ])
-        else:
-            proj = None
 
         # reload pretrained word embeddings
         if params.reload_emb != '':
@@ -273,7 +239,4 @@ def build_model(params, dico):
             for k, p in decoder.named_parameters():
                 logger.info("%s:%s" % (k, p.requires_grad))
 
-        if params.disc_step:
-            return encoder.cuda(), decoder.cuda(), proj.cuda()  # update
-        else:
-            return encoder.cuda(), decoder.cuda(), proj
+        return encoder.cuda(), decoder.cuda()

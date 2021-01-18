@@ -235,6 +235,24 @@ class TransformerFFN(nn.Module):
         x = F.dropout(x, p=self.dropout, training=self.training)
         return x
 
+class DiscLayer(nn.Module):
+    """
+    Compute the discriminator loss
+    """
+    def __init__(self, in_dim, dim_hidden, out_dim, dropout, gelu_activation):
+        super().__init__()
+        self.dropout = dropout
+        self.lin1 = Linear(in_dim, dim_hidden)
+        self.lin2 = Linear(dim_hidden, out_dim)
+        self.act = gelu if gelu_activation else F.relu
+
+    def forward(self, input, y):
+        x = self.lin1(input)
+        x = self.act(x)
+        x = self.lin2(x)
+        output = F.dropout(x, p=self.dropout, training=self.training)   # ？
+        loss = F.cross_entropy(output, y)
+        return loss
 
 class TransformerModel(nn.Module):
 
@@ -252,6 +270,7 @@ class TransformerModel(nn.Module):
         self.is_decoder = not is_encoder
         self.with_output = with_output
         self.with_adapter = params.with_adapter
+        self.with_disc = params.with_disc
 
         # dictionary / languages
         self.n_langs = params.n_langs
@@ -324,6 +343,10 @@ class TransformerModel(nn.Module):
             if params.share_inout_emb:
                 self.pred_layer.proj.weight = self.embeddings.weight
 
+        # discriminator layer
+        if self.with_disc:
+            self.disc_layer = DiscLayer(self.dim, params.disc_dim, params.n_classes, self.dropout, gelu_activation=False)
+
     def forward(self, mode, **kwargs):
         """
         Forward function with different forward modes.
@@ -334,7 +357,9 @@ class TransformerModel(nn.Module):
         elif mode == 'predict':
             return self.predict(**kwargs)
         elif mode == 'fwd_no_embed':
-            return self.fwd_no_embed(**kwargs)       
+            return self.fwd_no_embed(**kwargs)  
+        elif mode == 'classify':
+            return self.classify(**kwargs)
         else:
             raise Exception("Unknown mode: %s" % mode)
 
@@ -462,6 +487,10 @@ class TransformerModel(nn.Module):
         masked_tensor = tensor[pred_mask.unsqueeze(-1).expand_as(tensor)].view(-1, self.dim)
         scores, loss = self.pred_layer(masked_tensor, y, get_scores)
         return scores, loss
+
+    def classify(self, tensor, y):
+        loss = self.disc_layer(tensor, y)
+        return loss
 
     def generate(self, src_enc, src_len, tgt_lang_id, max_len=200, sample_temperature=None):
         """

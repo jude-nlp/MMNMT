@@ -261,6 +261,8 @@ def get_parser():
                 help="domain discriminator hidden dim")
     parser.add_argument("--n_classes", type=int, default=2,
                 help="classes to classify")
+    parser.add_argument("--disc_alpha", type=float, default=1,
+                help="weight of disc loss")
     return parser
 
 
@@ -277,24 +279,19 @@ def main(params):
 
     # load data
     data = load_data(params)
-    logger.info(data['dico'].items())
+    
     # build model
     if params.encoder_only:
-        model, proj = build_model(params, data['dico'])
-    elif params.double_encoder:
-        xlm_enc, encoder, decoder = build_model(params, data['dico'])
+        model = build_model(params, data['dico'])
     else:
-        encoder, decoder, proj = build_model(params, data['dico'])  # update
+        encoder, decoder = build_model(params, data['dico'])  # update
 
     # build trainer, reload potential checkpoints / build evaluator
     if params.encoder_only:
-        trainer = SingleTrainer(model, proj, data, params)
+        trainer = SingleTrainer(model, data, params)
         evaluator = SingleEvaluator(trainer, data, params)
-    elif params.double_encoder:
-        trainer = XlmEncDecTrainer(xlm_enc, encoder, decoder, data, params)
-        evaluator = XlmEncDecEvaluator(trainer, data, params)
     else:
-        trainer = EncDecTrainer(encoder, decoder, proj, data, params)
+        trainer = EncDecTrainer(encoder, decoder, data, params)
         evaluator = EncDecEvaluator(trainer, data, params)
     
     # evaluation
@@ -335,19 +332,14 @@ def main(params):
 
             # machine translation steps
             for lang1, lang2 in shuf_order(params.mt_steps, params):
-                trainer.mt_step(lang1, lang2, params.lambda_mt)
+                if params.with_disc:
+                    trainer.mt_step_disc(lang1, lang2, params.lambda_mt)
+                else:
+                    trainer.mt_step(lang1, lang2, params.lambda_mt)
 
             # back-translation steps
             for lang1, lang2, lang3 in shuf_order(params.bt_steps):
                 trainer.bt_step(lang1, lang2, lang3, params.lambda_bt)
-            # discriminator steps
-            if params.disc_step:
-                trainer.disc_step() # update 6/11
-                # benzema=9
-
-            # align steps
-            for lang1, lang2 in shuf_order(params.align_steps):    # update 8/14
-                trainer.align_step(lang1, lang2)
             
             # gmm cluster
             if len(params.gmm_steps) != 0:

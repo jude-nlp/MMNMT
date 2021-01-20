@@ -178,6 +178,12 @@ def build_model(params, dico):
                     for k, v in layer_6.items():
                         enc_reload[k] = v
 
+                if params.with_disc:
+                    enc_reload['disc_layer.lin1.weight'] = encoder.state_dict()['disc_layer.lin1.weight']
+                    enc_reload['disc_layer.lin1.bias'] = encoder.state_dict()['disc_layer.lin1.bias']
+                    enc_reload['disc_layer.lin2.weight'] = encoder.state_dict()['disc_layer.lin2.weight']
+                    enc_reload['disc_layer.lin2.bias'] = encoder.state_dict()['disc_layer.lin2.bias']
+
                 encoder.load_state_dict(enc_reload)
 
             if dec_path != '':

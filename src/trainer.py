@@ -126,7 +126,8 @@ class Trainer(object):
             [('MT-%s-%s' % (l1, l2), []) for l1, l2 in params.mt_steps] +
             [('BT-%s-%s-%s' % (l1, l2, l3), []) for l1, l2, l3 in params.bt_steps] +
             [('Align-%s-%s' % (l1, l2), []) for l1, l2 in params.align_steps] +    # update 8-14
-            [('DISC', [])]
+            [('disc', [])] +
+            [('loss_all', [])]
         )
 
         self.layer_sim = OrderedDict(   # update 8-21
@@ -593,35 +594,6 @@ class Trainer(object):
         logger.warning(f"Reloading checkpoint from {checkpoint_path} ...")
         data = torch.load(checkpoint_path, map_location='cpu')
 
-        # If lhuc Parameters not found  update 9/13
-        # encoder
-        lhuc1 = 'module.lhucs1.%i.weight'
-        lhuc2 = 'module.lhucs2.%i.weight'
-        lhuc15 = 'module.lhucs15.%i.weight'
-        if self.params.lhuc_encoder:
-            for i in range(self.params.n_layers):
-                '''
-                if lhuc1 % i not in data['encoder']:
-                    logger.warning("Model encoder Parameter %s not found." % (lhuc1 % i))
-                    data['encoder'][lhuc1 % i] = getattr(self, 'encoder').state_dict()[lhuc1 % i]
-                '''
-                if lhuc2 % i not in data['encoder']:
-                    logger.warning("Model encoder Parameter %s not found." % (lhuc2 % i))
-                    data['encoder'][lhuc2 % i] = getattr(self, 'encoder').state_dict()[lhuc2 % i]                                     
-        # decoder
-        if self.params.lhuc_decoder:
-            for i in range(self.params.n_layers):
-                '''
-                if lhuc1 % i not in data['decoder']:
-                    logger.warning("Model decoder Parameter %s not found." % (lhuc1 % i))
-                    data['decoder'][lhuc1 % i] = getattr(self, 'decoder').state_dict()[lhuc1 % i]
-                if lhuc15 % i not in data['decoder']:
-                    logger.warning("Model decoder Parameter %s not found." % (lhuc15 % i))
-                    data['decoder'][lhuc15 % i] = getattr(self, 'decoder').state_dict()[lhuc15 % i]
-                '''
-                if lhuc2 % i not in data['decoder']:
-                    logger.warning("Model decoder Parameter %s not found." % (lhuc2 % i))
-                    data['decoder'][lhuc2 % i] = getattr(self, 'decoder').state_dict()[lhuc2 % i]                  
         # reload model parameters
         for name in self.MODEL_NAMES:
             getattr(self, name).load_state_dict(data[name])
@@ -1172,7 +1144,7 @@ class ReverseLayerF(torch.autograd.Function):   # Update
 
 class SingleTrainer(Trainer):
 
-    def __init__(self, model, proj, data, params):
+    def __init__(self, model, data, params):
 
         self.MODEL_NAMES = ['model']
 
@@ -1180,7 +1152,6 @@ class SingleTrainer(Trainer):
         self.model = model
         self.data = data
         self.params = params
-        self.proj = proj
 
         super().__init__(data, params)
 
@@ -1233,27 +1204,17 @@ class SingleTrainer(Trainer):
 
 class EncDecTrainer(Trainer):
 
-    def __init__(self, encoder, decoder, proj,  data, params):
+    def __init__(self, encoder, decoder,  data, params):
 
         self.MODEL_NAMES = ['encoder', 'decoder']
 
         # model / data / params
         self.encoder = encoder
         self.decoder = decoder
-        self.proj = proj
         self.data = data
         self.params = params
-
+        self.dico = data['dico']
         super().__init__(data, params)
-
-        if params.disc_step:
-            # update 
-            setattr(self, 'proj', nn.parallel.DistributedDataParallel(getattr(self, 'proj'), device_ids=[params.local_rank], output_device=params.local_rank, broadcast_buffers=True))  # update
-            # optimizers
-            # self.optimizer_e = get_optimizer(self.parameters['encoder'], params.optimizer_e)
-            self.optimizer_p = get_optimizer(self.proj.parameters(), params.optimizer_p)
-            self.optimizer_e = self.optimizers['model']
-
 
     def mt_step(self, lang1, lang2, lambda_coeff):
         """
@@ -1307,6 +1268,107 @@ class EncDecTrainer(Trainer):
         # loss = lambda_coeff * loss
         loss = lambda_coeff * loss + 0 * sum(p.sum() for p in self.encoder.parameters())
 
+        # optimize
+        self.optimize(loss)
+
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size + 28
+        self.stats['processed_s'] += len2.size(0)
+        self.stats['processed_w'] += (len2 - 1).sum().item()
+
+    def mt_step_disc(self, lang1, lang2, lambda_coeff):
+        """
+        Machine translation step.
+        Can also be used for denoising auto-encoding.
+        """
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+        self.encoder.train()
+        self.decoder.train()
+
+        # generate batch
+        if lang1 == lang2:
+            (x1, len1) = self.get_batch('ae', lang1)
+            (x2, len2) = (x1, len1)
+            (x1, len1) = self.add_noise(x1, len1)
+        else:
+            (x1, len1), (x2, len2) = self.get_batch('mt', lang1, lang2)
+            if params.MT_noise:
+                (x1, len1) = self.add_noise(x1, len1)   # update 7/18
+
+        # lang1 = "fr"
+        lang1_id = params.lang2id[lang1]
+        lang2_id = params.lang2id[lang2]
+
+        '''
+        # logger.info("(x1) %s %s" % (x1, x1.size()))
+        # logger.info("(x2) %s %s" % (x2, x2.size()))
+        x2 = x2.tolist()
+        labels = torch.tensor([int(self.dico.id2word[index]) for index in x2[1]])
+        # logger.info("sum: %s" % torch.sum(labels))
+        # logger.info("len(labels): %s" % labels.size())
+        if torch.sum(labels) > 0:
+            # ood data
+            mt_alpha = 0
+        else:
+            mt_alpha = 1
+        # logger.info("mt_alpha: %s" % mt_alpha)
+        # logger.info("labels: %s" % labels)
+
+        # pop labels in x2
+        x2.pop(1)
+        x2 = torch.tensor(x2)
+        len2 = len2 - 1
+
+        # logger.info("after pop (x2) %s %s" % (x2, x2.size()))
+        # logger.info("len2 after minus 1  %s" % len2)
+        '''
+
+        langs1 = x1.clone().fill_(lang1_id)
+        langs2 = x2.clone().fill_(lang2_id)
+        bs = len(len1)  # update 
+
+        # target words to predict
+        alen = torch.arange(len2.max(), dtype=torch.long, device=len2.device)
+        # logger.info("alen: %s" % alen)
+        pred_mask = alen[:, None] < len2[None] - 1  # do not predict anything given the last target word
+        # logger.info("pred_mask: %s" % pred_mask)
+        y = x2[1:].masked_select(pred_mask[:-1])
+        assert len(y) == (len2 - 1).sum().item()
+        # logger.info("(y) %s %s" % (y, y.size()))
+
+        # cuda
+        x1, len1, langs1, x2, len2, langs2, y, labels = to_cuda(x1, len1, langs1, x2, len2, langs2, y, labels)
+
+        # encode source sentence
+        enc1 = self.encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)
+        enc1 = enc1.transpose(0, 1) # move back batch size to dimension 0. instance: torch.Size([32, 44, 512]) (bs, slen, dim)
+        # logger.info("enc1: %s %s" % (enc1, enc1.size()))
+
+        '''
+        # get sentence embedding (the first word ['/s'])
+        sent_emb = enc1[:, 0].squeeze()
+        # logger.info("sent_emb: %s %s" % (sent_emb, sent_emb.size()))
+        #loss_disc = self.encoder('classify', tensor=sent_emb, y=labels)
+        self.stats['disc'].append(loss_disc.item())
+        # logger.info("loss_disc: %s" % loss_disc)
+        # import sys
+        # sys.exit()
+        '''
+        
+        # decode target sentence
+        dec2 = self.decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
+
+        # loss
+        _, loss_mt = self.decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False)
+        self.stats[('AE-%s' % lang1) if lang1 == lang2 else ('MT-%s-%s' % (lang1, lang2))].append(loss_mt.item())
+        # loss = lambda_coeff * loss
+        # loss = lambda_coeff * loss + 0 * sum(p.sum() for p in self.encoder.parameters())
+        # loss = mt_alpha * loss_mt + params.disc_alpha * loss_disc + 0 * sum(p.sum() for p in self.encoder.parameters()) + 0 * sum(p.sum() for p in self.decoder.parameters())
+        loss = mt_alpha * loss_mt + 0 * sum(p.sum() for p in self.encoder.parameters()) + 0 * sum(p.sum() for p in self.encoder.parameters()) + 0 * sum(p.sum() for p in self.decoder.parameters())
+        self.stats['loss_all'].append(loss.item())
         # optimize
         self.optimize(loss)
 

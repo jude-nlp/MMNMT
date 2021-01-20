@@ -239,10 +239,6 @@ class Evaluator(object):
                 for lang1, lang2 in set(params.eval_mt_steps + [(l2, l3) for _, l2, l3 in params.bt_steps]):
                     eval_bleu = params.eval_bleu and params.is_master
                     self.evaluate_mt(scores, data_set, lang1, lang2, eval_bleu)
-
-                # discriminator
-                if params.disc_step and (data_set=='valid'):
-                    self.evaluate_disc(scores, data_set)
                     
                 # report average metrics per language
                 _clm_mono = [l1 for (l1, l2) in params.clm_steps if l2 is None]
@@ -254,10 +250,9 @@ class Evaluator(object):
                     scores['%s_mlm_ppl' % data_set] = np.mean([scores['%s_%s_mlm_ppl' % (data_set, lang)] for lang in _mlm_mono])
                     scores['%s_mlm_acc' % data_set] = np.mean([scores['%s_%s_mlm_acc' % (data_set, lang)] for lang in _mlm_mono])
                 _mt_para = params.mt_steps
-                logger.info(_mt_para)
-                if len(_mt_para) > 0:
-                    scores['%s_mt_ppl' % data_set] = np.mean([scores['%s_%s-%s_mt_ppl' % (data_set, lang1, lang2)] for lang1, lang2 in _mt_para])
-                    scores['%s_mt_acc' % data_set] = np.mean([scores['%s_%s-%s_mt_acc' % (data_set, lang1, lang2)] for lang1, lang2 in _mt_para])
+                # if len(_mt_para) > 0:
+                #     scores['%s_mt_ppl' % data_set] = np.mean([scores['%s_%s-%s_mt_ppl' % (data_set, lang1, lang2)] for lang1, lang2 in _mt_para])
+                #     scores['%s_mt_acc' % data_set] = np.mean([scores['%s_%s-%s_mt_acc' % (data_set, lang1, lang2)] for lang1, lang2 in _mt_para])
         return scores
 
     def evaluate_clm(self, scores, data_set, lang1, lang2):
@@ -411,80 +406,8 @@ class SingleEvaluator(Evaluator):
         """
         super().__init__(trainer, data, params)
         self.model = trainer.model
-        self.proj = trainer.proj
 
 
-    def get_disc_iterator(self, splt):
-        """
-        Build data iterator.
-        """
-        return self.data['disc'][splt]['x'].get_iterator(
-            shuffle=(splt == 'train'),
-            return_indices=True,
-            group_by_size=False
-        )
-
-    def evaluate_disc(self, scores, splt):   # Update
-        """
-        Evaluate on XNLI validation and test sets, for all languages.
-        """
-        params = self.params
-        self.model.eval()
-        self.proj.eval()
-
-        assert splt in ['valid', 'test']
-        has_labels = 'y' in self.data['disc'][splt]
-
-        # scores = OrderedDict({'epoch': self.epoch})
-
-        idxs = []  # sentence indices
-        prob = []  # probabilities
-        pred = []  # predicted values
-        gold = []  # real values
-
-        for batch in self.get_disc_iterator(splt):
-
-            # batch
-            (x, lengths), idx = batch
-            y = self.data['disc'][splt]['y'][idx] if has_labels else None
-
-            # cuda
-            x, y, lengths = to_cuda(x, y, lengths)
-
-            # prediction
-            output = self.proj(self.model('fwd', x=x, lengths=lengths, positions=None, langs=None, causal=False)[0])
-            p = output.data.max(1)[1]
-            idxs.append(idx)
-            prob.append(output.cpu().numpy())
-            pred.append(p.cpu().numpy())
-            if has_labels:
-                gold.append(y.cpu().numpy())
-
-        # indices / predictions
-        idxs = np.concatenate(idxs)
-        prob = np.concatenate(prob)
-        pred = np.concatenate(pred)
-        assert len(idxs) == len(pred), (len(idxs), len(pred))
-        assert idxs[-1] == len(idxs) - 1, (idxs[-1], len(idxs) - 1)
-
-        # score the predictions if we have labels
-        if has_labels:
-            gold = np.concatenate(gold)
-            scores['%s_acc' % splt] = 100. * (pred == gold).sum() / len(pred)
-            # scores['%s_f1' % splt] = 100. * f1_score(gold, pred, average='binary' if params.out_features == 2 else 'micro')
-            # scores['%s_mc' % splt] = 100. * matthews_corrcoef(gold, pred)
-            # logger.info("__log__:%s" % json.dumps(scores))
-        
-        """
-        # output predictions
-        pred_path = os.path.join(params.dump_path, f'{splt}.pred.{self.epoch}')
-        with open(pred_path, 'w') as f:
-            for i, p in zip(idxs, prob):
-                f.write('%i\t%s\n' % (i, ','.join([str(x) for x in p])))
-        logger.info(f"Wrote {len(idxs)} {splt} predictions to {pred_path}")
-        """
-
-        return scores
 
 class EncDecEvaluator(Evaluator):
 
@@ -495,17 +418,7 @@ class EncDecEvaluator(Evaluator):
         super().__init__(trainer, data, params)
         self.encoder = trainer.encoder
         self.decoder = trainer.decoder
-        self.proj = trainer.proj
 
-    def get_disc_iterator(self, splt):
-        """
-        Build data iterator.
-        """
-        return self.data['disc'][splt]['x'].get_iterator(
-            shuffle=(splt == 'train'),
-            return_indices=True,
-            group_by_size=False
-        )
 
     def evaluate_mt(self, scores, data_set, lang1, lang2, eval_bleu):
         """
@@ -615,77 +528,6 @@ class EncDecEvaluator(Evaluator):
             logger.info("BLEU %s %s : %f" % (hyp_path, ref_path, bleu))
             scores['%s_%s-%s_mt_bleu' % (data_set, lang1, lang2)] = bleu
 
-
-    def evaluate_disc(self, scores, splt):   # Update
-        """
-        Evaluate on XNLI validation and test sets, for all languages.
-        """
-        params = self.params
-        self.encoder.eval()
-        self.proj.eval()
-
-        assert splt in ['valid', 'test']
-        has_labels = 'y' in self.data['disc'][splt]
-
-        # scores = OrderedDict({'epoch': self.epoch})
-
-        idxs = []  # sentence indices
-        prob = []  # probabilities
-        pred = []  # predicted values
-        gold = []  # real values
-
-        for batch in self.get_disc_iterator(splt):
-
-            # batch
-            (x, lengths), idx = batch
-            y = self.data['disc'][splt]['y'][idx] if has_labels else None
-
-            # cuda
-            x, y, lengths = to_cuda(x, y, lengths)
-
-            # prediction
-            # output = self.proj(self.encoder('fwd', x=x, lengths=lengths, positions=None, langs=None, causal=False)[0])
-            # encoding sent and max pooling	update 8-18
-            h = self.encoder('fwd', x=x, lengths=lengths, positions=None, langs=None, causal=False)
-            h = h.transpose(0, 1)
-            max_pool = torch.nn.MaxPool2d((len(h[0]),1), stride=1)
-            h = max_pool(h).squeeze()
-
-            # prediction
-            output = self.proj(h)
-
-            p = output.data.max(1)[1]
-            idxs.append(idx)
-            prob.append(output.cpu().numpy())
-            pred.append(p.cpu().numpy())
-            if has_labels:
-                gold.append(y.cpu().numpy())
-
-        # indices / predictions
-        idxs = np.concatenate(idxs)
-        prob = np.concatenate(prob)
-        pred = np.concatenate(pred)
-        assert len(idxs) == len(pred), (len(idxs), len(pred))
-        assert idxs[-1] == len(idxs) - 1, (idxs[-1], len(idxs) - 1)
-
-        # score the predictions if we have labels
-        if has_labels:
-            gold = np.concatenate(gold)
-            scores['%s_acc' % splt] = 100. * (pred == gold).sum() / len(pred)
-            # scores['%s_f1' % splt] = 100. * f1_score(gold, pred, average='binary' if params.out_features == 2 else 'micro')
-            # scores['%s_mc' % splt] = 100. * matthews_corrcoef(gold, pred)
-            # logger.info("__log__:%s" % json.dumps(scores))
-        
-        """
-        # output predictions
-        pred_path = os.path.join(params.dump_path, f'{splt}.pred.{self.epoch}')
-        with open(pred_path, 'w') as f:
-            for i, p in zip(idxs, prob):
-                f.write('%i\t%s\n' % (i, ','.join([str(x) for x in p])))
-        logger.info(f"Wrote {len(idxs)} {splt} predictions to {pred_path}")
-        """
-
-        return scores
 
 class XlmEncDecEvaluator(Evaluator):
 

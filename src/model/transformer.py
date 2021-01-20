@@ -251,6 +251,7 @@ class DiscLayer(nn.Module):
         x = self.act(x)
         x = self.lin2(x)
         output = F.dropout(x, p=self.dropout, training=self.training)   # ？
+        # logger.info("output: %s" % output)
         loss = F.cross_entropy(output, y)
         return loss
 
@@ -344,7 +345,7 @@ class TransformerModel(nn.Module):
                 self.pred_layer.proj.weight = self.embeddings.weight
 
         # discriminator layer
-        if self.with_disc:
+        if self.with_disc and self.is_encoder:
             self.disc_layer = DiscLayer(self.dim, params.disc_dim, params.n_classes, self.dropout, gelu_activation=False)
 
     def forward(self, mode, **kwargs):
@@ -355,9 +356,7 @@ class TransformerModel(nn.Module):
         if mode == 'fwd':
             return self.fwd(**kwargs)
         elif mode == 'predict':
-            return self.predict(**kwargs)
-        elif mode == 'fwd_no_embed':
-            return self.fwd_no_embed(**kwargs)  
+            return self.predict(**kwargs) 
         elif mode == 'classify':
             return self.classify(**kwargs)
         else:

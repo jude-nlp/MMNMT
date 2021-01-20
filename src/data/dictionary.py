@@ -13,6 +13,11 @@ from logging import getLogger
 
 logger = getLogger()
 
+#
+# '<s>': 0, '</s>': 1, '<pad>': 2, '<unk>': 3, 
+# '<special0>': 4, '<special1>': 5, '<special2>': 6, '<special3>': 7, '<special4>': 8, 
+# '<special5>': 9, '<special6>': 10, '<special7>': 11, '<special8>': 12, '<special9>': 13
+#
 
 BOS_WORD = '<s>'
 EOS_WORD = '</s>'

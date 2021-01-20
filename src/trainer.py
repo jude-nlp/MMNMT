@@ -38,6 +38,7 @@ class Trainer(object):
         Initialize trainer.
         """
         # epoch / iteration size
+        self.params = params
         self.epoch_size = params.epoch_size
         if self.epoch_size == -1:
             self.epoch_size = self.data
@@ -596,7 +597,13 @@ class Trainer(object):
 
         # reload model parameters
         for name in self.MODEL_NAMES:
-            getattr(self, name).load_state_dict(data[name])
+            model_reload = data[name]
+            if self.params.with_disc and (name == "encoder"):
+                model_reload['module.disc_layer.lin1.weight'] = getattr(self, name).state_dict()['module.disc_layer.lin1.weight']
+                model_reload['module.disc_layer.lin1.bias'] = getattr(self, name).state_dict()['module.disc_layer.lin1.bias']
+                model_reload['module.disc_layer.lin2.weight'] = getattr(self, name).state_dict()['module.disc_layer.lin2.weight']
+                model_reload['module.disc_layer.lin2.bias'] = getattr(self, name).state_dict()['module.disc_layer.lin2.bias']
+            getattr(self, name).load_state_dict(model_reload)
 
         # reload optimizers
         for name in self.optimizers.keys():
@@ -1241,6 +1248,14 @@ class EncDecTrainer(Trainer):
             if params.MT_noise:
                 (x1, len1) = self.add_noise(x1, len1)   # update 7/18
 
+        x2 = x2.tolist()
+        labels = torch.tensor([int(self.dico.id2word[index]) for index in x2[1]])
+        # pop labels in x2
+        x2.pop(1)
+        x2 = torch.tensor(x2)
+        len2 = len2 - 1
+
+
         langs1 = x1.clone().fill_(lang1_id)
         langs2 = x2.clone().fill_(lang2_id)
         bs = len(len1)  # update 
@@ -1288,6 +1303,100 @@ class EncDecTrainer(Trainer):
         self.encoder.train()
         self.decoder.train()
 
+        lang1_id = params.lang2id[lang1]
+        lang2_id = params.lang2id[lang2]
+
+        # generate batch
+        if lang1 == lang2:
+            (x1, len1) = self.get_batch('ae', lang1)
+            (x2, len2) = (x1, len1)
+            (x1, len1) = self.add_noise(x1, len1)
+        else:
+            (x1, len1), (x2, len2) = self.get_batch('mt', lang1, lang2)
+            if params.MT_noise:
+                (x1, len1) = self.add_noise(x1, len1)   # update 7/18
+
+        # get labels
+        x2 = x2.tolist()
+        labels = torch.tensor([int(self.dico.id2word[index]) for index in x2[1]])
+
+        # 根据labels判断当前batch来自领域内还是领域外的数据集
+        if torch.sum(labels) > 0:
+            is_ood = True
+        else:
+            is_ood = False
+
+        # 领域外的数据仅用作分类任务
+        if is_ood:
+            # ood data
+            lang1 = "fr"    # 文件名称为de-en，所以显式将其转换成fr
+
+        # pop labels in x2
+        x2.pop(1)
+        x2 = torch.tensor(x2)
+        len2 = len2 - 1
+
+        langs1 = x1.clone().fill_(lang1_id)
+        langs2 = x2.clone().fill_(lang2_id)
+
+        if is_ood:
+            # ood data
+            lang1 = "de"    # 换回 de ，方便统计loss，其实还是fr数据
+
+        bs = len(len1)  # update 
+        # logger.info("mt: %d sents per batch." % bs) # update
+
+        # target words to predict
+        alen = torch.arange(len2.max(), dtype=torch.long, device=len2.device)
+        pred_mask = alen[:, None] < len2[None] - 1  # do not predict anything given the last target word
+        y = x2[1:].masked_select(pred_mask[:-1])
+        assert len(y) == (len2 - 1).sum().item()
+
+        # cuda
+        x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
+
+        # encode source sentence
+        enc1 = self.encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)
+        enc1 = enc1.transpose(0, 1)
+
+        # 分类任务
+        sent_emb = enc1[:, 0].squeeze()
+        loss_disc = self.encoder('classify', tensor=sent_emb, y=labels)
+        self.stats['disc'].append(loss_disc.item())
+
+        # 领域内数据
+        if not is_ood:
+            # decode target sentence
+            dec2 = self.decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
+            # loss
+            _, loss_mt = self.decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False)
+            self.stats[('AE-%s' % lang1) if lang1 == lang2 else ('MT-%s-%s' % (lang1, lang2))].append(loss_mt.item())
+            loss =  loss_mt + params.disc_alpha * loss_disc + 0 * sum(p.sum() for p in self.encoder.parameters())
+        # 领域外数据
+        else:
+            loss = params.disc_alpha * loss_disc + 0 * sum(p.sum() for p in self.encoder.parameters()) + 0 * sum(p.sum() for p in self.decoder.parameters())
+
+
+        # optimize
+        self.optimize(loss)
+
+        # number of processed sentences / words
+        self.n_sentences += params.batch_size + 28
+        self.stats['processed_s'] += len2.size(0)
+        self.stats['processed_w'] += (len2 - 1).sum().item()
+
+    def mt_step_disc_demo(self, lang1, lang2, lambda_coeff):
+        """
+        Machine translation step.
+        Can also be used for denoising auto-encoding.
+        """
+        assert lambda_coeff >= 0
+        if lambda_coeff == 0:
+            return
+        params = self.params
+        self.encoder.train()
+        self.decoder.train()
+
         # generate batch
         if lang1 == lang2:
             (x1, len1) = self.get_batch('ae', lang1)
@@ -1302,7 +1411,7 @@ class EncDecTrainer(Trainer):
         lang1_id = params.lang2id[lang1]
         lang2_id = params.lang2id[lang2]
 
-        '''
+        
         # logger.info("(x1) %s %s" % (x1, x1.size()))
         # logger.info("(x2) %s %s" % (x2, x2.size()))
         x2 = x2.tolist()
@@ -1324,7 +1433,7 @@ class EncDecTrainer(Trainer):
 
         # logger.info("after pop (x2) %s %s" % (x2, x2.size()))
         # logger.info("len2 after minus 1  %s" % len2)
-        '''
+        
 
         langs1 = x1.clone().fill_(lang1_id)
         langs2 = x2.clone().fill_(lang2_id)

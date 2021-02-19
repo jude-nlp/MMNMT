@@ -1248,14 +1248,6 @@ class EncDecTrainer(Trainer):
             if params.MT_noise:
                 (x1, len1) = self.add_noise(x1, len1)   # update 7/18
 
-        x2 = x2.tolist()
-        labels = torch.tensor([int(self.dico.id2word[index]) for index in x2[1]])
-        # pop labels in x2
-        x2.pop(1)
-        x2 = torch.tensor(x2)
-        len2 = len2 - 1
-
-
         langs1 = x1.clone().fill_(lang1_id)
         langs2 = x2.clone().fill_(lang2_id)
         bs = len(len1)  # update 
@@ -1331,6 +1323,12 @@ class EncDecTrainer(Trainer):
             # ood data
             lang1 = "fr"    # 文件名称为de-en，所以显式将其转换成fr
 
+        # 仅第一个微调epoch使用判别器
+        if self.epoch == 62:
+            disc_alpha = self.params.disc_alpha
+        else:
+            disc_alpha = 0
+
         # pop labels in x2
         x2.pop(1)
         x2 = torch.tensor(x2)
@@ -1360,21 +1358,26 @@ class EncDecTrainer(Trainer):
         enc1 = enc1.transpose(0, 1)
 
         # 分类任务
-        sent_emb = enc1[:, 0].squeeze()
+        # 方法一、用第一个词去表示整句话
+        # sent_emb = enc1[:, 0].squeeze()
+        # 方法二、max_pooling
+        max_pool = torch.nn.MaxPool2d((len(enc1[0]),1), stride=1)
+        sent_emb = max_pool(enc1).squeeze()
+
         loss_disc = self.encoder('classify', tensor=sent_emb, y=labels)
         self.stats['disc'].append(loss_disc.item())
 
         # 领域内数据
-        if not is_ood:
+        if False:
             # decode target sentence
             dec2 = self.decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
             # loss
             _, loss_mt = self.decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False)
             self.stats[('AE-%s' % lang1) if lang1 == lang2 else ('MT-%s-%s' % (lang1, lang2))].append(loss_mt.item())
-            loss =  loss_mt + params.disc_alpha * loss_disc + 0 * sum(p.sum() for p in self.encoder.parameters())
+            loss =  loss_mt + disc_alpha * loss_disc + 0 * sum(p.sum() for p in self.encoder.parameters())
         # 领域外数据
         else:
-            loss = params.disc_alpha * loss_disc + 0 * sum(p.sum() for p in self.encoder.parameters()) + 0 * sum(p.sum() for p in self.decoder.parameters())
+            loss = disc_alpha * loss_disc + 0 * sum(p.sum() for p in self.encoder.parameters()) + 0 * sum(p.sum() for p in self.decoder.parameters())
 
 
         # optimize
@@ -1460,13 +1463,13 @@ class EncDecTrainer(Trainer):
         # get sentence embedding (the first word ['/s'])
         sent_emb = enc1[:, 0].squeeze()
         # logger.info("sent_emb: %s %s" % (sent_emb, sent_emb.size()))
-        #loss_disc = self.encoder('classify', tensor=sent_emb, y=labels)
+        loss_disc = self.encoder('classify', tensor=sent_emb, y=labels)
         self.stats['disc'].append(loss_disc.item())
         # logger.info("loss_disc: %s" % loss_disc)
         # import sys
         # sys.exit()
         '''
-        
+
         # decode target sentence
         dec2 = self.decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
 

@@ -250,8 +250,8 @@ class Evaluator(object):
                     scores['%s_mlm_ppl' % data_set] = np.mean([scores['%s_%s_mlm_ppl' % (data_set, lang)] for lang in _mlm_mono])
                     scores['%s_mlm_acc' % data_set] = np.mean([scores['%s_%s_mlm_acc' % (data_set, lang)] for lang in _mlm_mono])
                 _mt_para = params.mt_steps
-                # if len(_mt_para) > 0:
-                #     scores['%s_mt_ppl' % data_set] = np.mean([scores['%s_%s-%s_mt_ppl' % (data_set, lang1, lang2)] for lang1, lang2 in _mt_para])
+                if len(_mt_para) > 0:
+                    scores['%s_mt_ppl' % data_set] = np.mean([scores['%s_%s-%s_mt_ppl' % (data_set, lang1, lang2)] for lang1, lang2 in _mt_para])
                 #     scores['%s_mt_acc' % data_set] = np.mean([scores['%s_%s-%s_mt_acc' % (data_set, lang1, lang2)] for lang1, lang2 in _mt_para])
         return scores
 

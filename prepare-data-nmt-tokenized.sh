@@ -1,22 +1,7 @@
-# Copyright (c) 2019-present, Facebook, Inc.
-# All rights reserved.
-#
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-#
-
 set -e
 
+CODES=30000
 
-#
-# Data preprocessing configuration
-#
-N_THREADS=16    # number of threads in data preprocessing
-
-
-#
-# Read arguments
-#
 POSITIONAL=()
 while [[ $# -gt 0 ]]
 do
@@ -32,6 +17,8 @@ case $key in
     RELOAD_VOCAB="$2"; shift 2;;
   --prep)
     PREP="$2"; shift 2;;
+  --proc_name)
+    PROC_NAME="$2"; shift 2;;
   *)
   POSITIONAL+=("$1")
   shift
@@ -46,8 +33,6 @@ set -- "${POSITIONAL[@]}"
 #
 if [ "$SRC" == "" ]; then echo "--src not provided"; exit; fi
 if [ "$TGT" == "" ]; then echo "--tgt not provided"; exit; fi
-if [ "$SRC" != "de" -a "$SRC" != "en" -a "$SRC" != "fr" -a "$SRC" != "ro" ]; then echo "unknown source language"; exit; fi
-if [ "$TGT" != "de" -a "$TGT" != "en" -a "$TGT" != "fr" -a "$TGT" != "ro" ]; then echo "unknown target language"; exit; fi
 if [ "$SRC" == "$TGT" ]; then echo "source and target cannot be identical"; exit; fi
 if [ "$RELOAD_CODES" != "" ] && [ ! -f "$RELOAD_CODES" ]; then echo "cannot locate BPE codes"; exit; fi
 if [ "$RELOAD_VOCAB" != "" ] && [ ! -f "$RELOAD_VOCAB" ]; then echo "cannot locate vocabulary"; exit; fi
@@ -62,21 +47,11 @@ if [ "$PREP" == "" ]; then echo "--prep not provided"; exit; fi
 MAIN_PATH=$PWD
 TOOLS_PATH=$PWD/tools
 DATA_PATH=$PWD/data
-PROC_PATH=$DATA_PATH/processed/$SRC-$TGT
-TMP=$PREP/tmp
+PROC_PATH=$DATA_PATH/processed/$PROC_NAME
 
 # create paths
 mkdir -p $TOOLS_PATH
 mkdir -p $PROC_PATH
-mkdir -p $TMP
-
-# moses
-MOSES=$TOOLS_PATH/mosesdecoder
-REPLACE_UNICODE_PUNCT=$MOSES/scripts/tokenizer/replace-unicode-punctuation.perl
-NORM_PUNC=$MOSES/scripts/tokenizer/normalize-punctuation.perl
-REM_NON_PRINT_CHAR=$MOSES/scripts/tokenizer/remove-non-printing-char.perl
-TOKENIZER=$MOSES/scripts/tokenizer/tokenizer.perl
-INPUT_FROM_SGM=$MOSES/scripts/ems/support/input-from-sgm.perl
 
 # fastBPE
 FASTBPE_DIR=$TOOLS_PATH/fastBPE
@@ -100,12 +75,12 @@ PARA_TGT_TEST_BPE=$PROC_PATH/test.$SRC-$TGT.$TGT
 # valid / test file raw data
 unset PARA_SRC_TRAIN PARA_TGT_TRAIN PARA_SRC_VALID PARA_TGT_VALID PARA_SRC_TEST PARA_TGT_TEST    # Update
 
-PARA_SRC_TRAIN=$TMP/train.$SRC.tok
-PARA_TGT_TRAIN=$TMP/train.$TGT.tok 
-PARA_SRC_VALID=$TMP/valid.$SRC.tok
-PARA_TGT_VALID=$TMP/valid.$TGT.tok
-PARA_SRC_TEST=$TMP/test.$SRC.tok
-PARA_TGT_TEST=$TMP/test.$TGT.tok
+PARA_SRC_TRAIN=$PREP/train.$SRC.tok
+PARA_TGT_TRAIN=$PREP/train.$TGT.tok 
+PARA_SRC_VALID=$PREP/valid.$SRC.tok
+PARA_TGT_VALID=$PREP/valid.$TGT.tok
+PARA_SRC_TEST=$PREP/test.$SRC.tok
+PARA_TGT_TEST=$PREP/test.$TGT.tok
 
 # reload BPE codes
 cd $MAIN_PATH
@@ -113,6 +88,13 @@ if [ ! -f "$BPE_CODES" ] && [ -f "$RELOAD_CODES" ]; then
   echo "Reloading BPE codes from $RELOAD_CODES ..."
   cp $RELOAD_CODES $BPE_CODES
 fi
+
+# learn BPE codes
+if [ ! -f "$BPE_CODES" ]; then
+  echo "Learning BPE codes..."
+  $FASTBPE learnbpe $CODES $PARA_SRC_TRAIN $PARA_TGT_TRAIN > $BPE_CODES
+fi
+echo "BPE learned in $BPE_CODES"
 
 echo "Applying BPE to train files..."
 $FASTBPE applybpe $PARA_SRC_TRAIN_BPE $PARA_SRC_TRAIN $BPE_CODES     # Update
@@ -134,6 +116,12 @@ if [ ! -f "$FULL_VOCAB" ] && [ -f "$RELOAD_VOCAB" ]; then
   cp $RELOAD_VOCAB $FULL_VOCAB
 fi
 
+# extract full vocabulary
+if ! [[ -f "$FULL_VOCAB" ]]; then
+  echo "Extracting vocabulary..."
+  $FASTBPE getvocab $PARA_SRC_TRAIN_BPE $PARA_TGT_TRAIN_BPE > $FULL_VOCAB
+fi
+echo "Full vocab in: $FULL_VOCAB"
 
 echo "Applying BPE to valid and test files..."
 $FASTBPE applybpe $PARA_SRC_VALID_BPE $PARA_SRC_VALID $BPE_CODES $SRC_VOCAB

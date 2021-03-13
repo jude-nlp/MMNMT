@@ -1251,7 +1251,7 @@ class EncDecTrainer(Trainer):
         langs1 = x1.clone().fill_(lang1_id)
         langs2 = x2.clone().fill_(lang2_id)
         bs = len(len1)  # update 
-        # logger.info("mt: %d sents per batch." % bs) # update
+
 
         # target words to predict
         alen = torch.arange(len2.max(), dtype=torch.long, device=len2.device)
@@ -1267,10 +1267,19 @@ class EncDecTrainer(Trainer):
         enc1 = enc1.transpose(0, 1)
 
         # decode target sentence
-        dec2 = self.decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
+        dec2, attn_dist = self.decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
+
+        x1 = x1.transpose(0, 1).unsqueeze(1)
+        x1 = x1.expand_as(attn_dist)
+        x1 = x1.transpose(0, 1)
+        x1 = x1[pred_mask.unsqueeze(-1).expand_as(x1)].view(-1, x1.size()[-1])
+
+        attn_dist = attn_dist.transpose(0, 1)
+        attn_dist = attn_dist[pred_mask.unsqueeze(-1).expand_as(attn_dist)].view(-1, attn_dist.size()[-1])
+
 
         # loss
-        _, loss = self.decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False)
+        _, loss = self.decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, src=x1, src_attn=attn_dist, score_alpha=self.params.score_alpha, get_scores=False)
         self.stats[('AE-%s' % lang1) if lang1 == lang2 else ('MT-%s-%s' % (lang1, lang2))].append(loss.item())
         # loss = lambda_coeff * loss
         loss = lambda_coeff * loss + 0 * sum(p.sum() for p in self.encoder.parameters())

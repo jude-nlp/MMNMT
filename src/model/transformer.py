@@ -123,15 +123,35 @@ class PredLayer(nn.Module):
                 head_bias=True,  # default is False
             )
 
-    def forward(self, x, y, get_scores=False):
+    def forward(self, x, y, src, src_attn, score_alpha, get_scores=False):
         """
         Compute the loss, and optionally the scores.
+        src: a batch of indexed source sentences 
+        src_attn: the attention distribution of source sentences
+        score_alpha: the weight of two distributions
         """
         assert (y == self.pad_index).sum().item() == 0
 
         if self.asm is False:
-            scores = self.proj(x).view(-1, self.n_words)
-            loss = F.cross_entropy(scores, y, reduction='mean')
+            scores = self.proj(x).view(-1, self.n_words)  
+            soft_scores = F.softmax(scores, dim=1)
+
+            # 分别乘以权重
+            soft_scores = soft_scores * score_alpha
+            src_attn = src_attn * (1 - score_alpha)
+
+            attn_scores = torch.zeros_like(soft_scores)
+            for i in range(len(attn_scores)):
+                '''
+                这样其实有一个问题，就是src中重复的值最后只取一个，就先这样吧
+                '''
+                attn_scores[i][src[i]] = src_attn[i]
+
+            final_scores = soft_scores + attn_scores
+
+            # 用另一种方式去计算loss，与直接使用F.cross_entropy结果一致
+            log_final_scores = torch.log(final_scores)
+            loss = F.nll_loss(log_final_scores, y)
         else:
             _, loss = self.proj(x, y)
             scores = self.proj.log_prob(x) if get_scores else None
@@ -144,6 +164,28 @@ class PredLayer(nn.Module):
         """
         assert x.dim() == 2
         return self.proj.log_prob(x) if self.asm else self.proj(x)
+
+    def get_mixed_scores(self, x, src, src_attn, score_alpha):
+        """
+        mixed scores for copynet
+        """
+        assert x.dim() == 2
+        scores = self.proj(x)
+        
+        soft_scores = F.softmax(scores, dim=1)
+        # 权重
+        soft_scores = soft_scores * score_alpha
+        src_attn = src_attn * (1 - score_alpha)
+
+        attn_scores = torch.zeros_like(soft_scores)
+        for i in range(len(attn_scores)):
+            '''
+            这样其实有一个问题，就是src中重复的值最后只取一个，就先这样吧
+            '''
+            attn_scores[i][src[i]] = src_attn[i]
+
+        final_scores = soft_scores + attn_scores
+        return final_scores
 
 
 class MultiHeadAttention(nn.Module):
@@ -213,10 +255,16 @@ class MultiHeadAttention(nn.Module):
 
         weights = F.softmax(scores.float(), dim=-1).type_as(scores)           # (bs, n_heads, qlen, klen)
         weights = F.dropout(weights, p=self.dropout, training=self.training)  # (bs, n_heads, qlen, klen)
+
+        attn_dist = None
+        if kv is not None:
+            wt_sum = torch.sum(weights, dim=1)
+            attn_dist = wt_sum / 8
+
         context = torch.matmul(weights, v)                                    # (bs, n_heads, qlen, dim_per_head)
         context = unshape(context)                                            # (bs, qlen, dim)
 
-        return self.out_lin(context)
+        return self.out_lin(context), attn_dist
 
 
 class TransformerFFN(nn.Module):
@@ -272,6 +320,9 @@ class TransformerModel(nn.Module):
         self.with_output = with_output
         self.with_adapter = params.with_adapter
         self.with_disc = params.with_disc
+
+        # copynet attention distribution
+        self.attn_dist = torch.tensor([])
 
         # dictionary / languages
         self.n_langs = params.n_langs
@@ -432,14 +483,14 @@ class TransformerModel(nn.Module):
             if self.with_adapter and i == self.n_layers - 1:
                 residual = tensor
             # self attention
-            attn = self.attentions[i](tensor, attn_mask, cache=cache)
+            attn, _ = self.attentions[i](tensor, attn_mask, cache=cache)
             attn = F.dropout(attn, p=self.dropout, training=self.training)
             tensor = tensor + attn
             tensor = self.layer_norm1[i](tensor)
 
             # encoder attention (for decoder only)
             if self.is_decoder and src_enc is not None:
-                attn = self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache)
+                attn, self.attn_dist = self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache)   # return attention distribution
                 attn = F.dropout(attn, p=self.dropout, training=self.training)
                 tensor = tensor + attn
                 tensor = self.layer_norm15[i](tensor)
@@ -470,12 +521,12 @@ class TransformerModel(nn.Module):
         # move back sequence length to dimension 0
         tensor = tensor.transpose(0, 1)
 
-        if self.params.get_layer_tensors:   # update 8-21
-            return layer_tensors, tensor
+        if self.is_decoder:   # update 8-21
+            return tensor, self.attn_dist
         else:
             return tensor
 
-    def predict(self, tensor, pred_mask, y, get_scores):
+    def predict(self, tensor, pred_mask, y, src, src_attn, score_alpha, get_scores):
         """
         Given the last hidden state, compute word scores and/or the loss.
             `pred_mask` is a ByteTensor of shape (slen, bs), filled with 1 when
@@ -484,14 +535,14 @@ class TransformerModel(nn.Module):
             `get_scores` is a boolean specifying whether we need to return scores
         """
         masked_tensor = tensor[pred_mask.unsqueeze(-1).expand_as(tensor)].view(-1, self.dim)
-        scores, loss = self.pred_layer(masked_tensor, y, get_scores)
+        scores, loss = self.pred_layer(masked_tensor, y, src, src_attn, score_alpha, get_scores)
         return scores, loss
 
     def classify(self, tensor, y):
         loss = self.disc_layer(tensor, y)
         return loss
 
-    def generate(self, src_enc, src_len, tgt_lang_id, max_len=200, sample_temperature=None):
+    def generate(self, src_enc, src_len, tgt_lang_id, src,  max_len=200, sample_temperature=None):
         """
         Decode a sentence given initial start.
         `x`:
@@ -537,7 +588,7 @@ class TransformerModel(nn.Module):
         while cur_len < max_len:
 
             # compute word scores
-            tensor = self.forward(
+            tensor, attn_dist = self.forward(
                 'fwd',
                 x=generated[:cur_len],
                 lengths=gen_len,
@@ -549,9 +600,12 @@ class TransformerModel(nn.Module):
                 cache=cache
             )
             assert tensor.size() == (1, bs, self.dim), (cur_len, max_len, src_enc.size(), tensor.size(), (1, bs, self.dim))
+            attn_dist = attn_dist.squeeze(dim=1)
             tensor = tensor.data[-1, :, :].type_as(src_enc)  # (bs, dim)
-            scores = self.pred_layer.get_scores(tensor)      # (bs, n_words)
 
+            # scores = self.pred_layer.get_scores(tensor)      # (bs, n_words)
+            scores = self.pred_layer.get_mixed_scores(tensor, src, attn_dist, self.params.score_alpha)
+            
             # select next words: sample or greedy
             if sample_temperature is None:
                 next_words = torch.topk(scores, 1)[1].squeeze(1)

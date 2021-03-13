@@ -468,16 +468,27 @@ class EncDecEvaluator(Evaluator):
             # cuda
             x1, len1, langs1, x2, len2, langs2, y = to_cuda(x1, len1, langs1, x2, len2, langs2, y)
 
+            # src
+            src = x1.clone()    # for copynet
+            
             # encode source sentence
             enc1 = encoder('fwd', x=x1, lengths=len1, langs=langs1, causal=False)
             enc1 = enc1.transpose(0, 1)
             enc1 = enc1.half() if params.fp16 else enc1
 
             # decode target sentence
-            dec2 = decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
+            dec2, attn_dist = decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
+
+            x1 = x1.transpose(0, 1).unsqueeze(1)
+            x1 = x1.expand_as(attn_dist)
+            x1 = x1.transpose(0, 1)
+            x1 = x1[pred_mask.unsqueeze(-1).expand_as(x1)].view(-1, x1.size()[-1])
+
+            attn_dist = attn_dist.transpose(0, 1)
+            attn_dist = attn_dist[pred_mask.unsqueeze(-1).expand_as(attn_dist)].view(-1, attn_dist.size()[-1])
 
             # loss
-            word_scores, loss = decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=True)
+            word_scores, loss = decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, src=x1, src_attn=attn_dist, score_alpha=params.score_alpha, get_scores=True)
 
             # update stats
             n_words += y.size(0)
@@ -490,8 +501,9 @@ class EncDecEvaluator(Evaluator):
             # generate translation - translate / convert to text
             if eval_bleu:
                 max_len = int(1.5 * len1.max().item() + 10)
+                src = src.transpose(0, 1)
                 if params.beam_size == 1:
-                    generated, lengths = decoder.generate(enc1, len1, lang2_id, max_len=max_len)
+                    generated, lengths = decoder.generate(enc1, len1, lang2_id,  src=src, max_len=max_len)
                 else:
                     generated, lengths = decoder.generate_beam(
                         enc1, len1, lang2_id, beam_size=params.beam_size,
@@ -600,10 +612,18 @@ class XlmEncDecEvaluator(Evaluator):
             enc1 = enc1.half() if params.fp16 else enc1
 
             # decode target sentence
-            dec2 = decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
+            dec2, attn_dist = decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
+
+            x1 = x1.transpose(0, 1).unsqueeze(1)
+            x1 = x1.expand_as(attn_dist)
+            x1 = x1.transpose(0, 1)
+            x1 = x1[pred_mask.unsqueeze(-1).expand_as(x1)].view(-1, x1.size()[-1])
+
+            attn_dist = attn_dist.transpose(0, 1)
+            attn_dist = attn_dist[pred_mask.unsqueeze(-1).expand_as(attn_dist)].view(-1, attn_dist.size()[-1])
 
             # loss
-            word_scores, loss = decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=True)
+            word_scores, loss = decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, src=x1, src_attn=attn_dist, score_alpha=self.params.score_alpha, get_scores=True)
 
             # update stats
             n_words += y.size(0)

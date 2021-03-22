@@ -8,6 +8,7 @@
 import os
 import math
 import time
+import random
 from logging import getLogger
 from collections import OrderedDict
 import numpy as np
@@ -1248,10 +1249,45 @@ class EncDecTrainer(Trainer):
             if params.MT_noise:
                 (x1, len1) = self.add_noise(x1, len1)   # update 7/18
 
+        '''
+        下面部分，针对copynet随机生成不同的训练数据，其中随机指的是提示性文本tips从原始x2中动态抽取
+        '''
+        # 计算抽取相关参数
+        max_tips_len = int(np.sqrt(len2.min() - 2)) # 最大片段长度;len2.min() - 2去掉开头/结尾标记
+        if max_tips_len > 1:
+            tips_len = np.random.randint(1, max_tips_len)   # 随机选取片段长度
+        else:
+            tips_len = 1
+        tips_size = int((len2.min() - 2) // tips_len)  # 共可以切分为多少片段
+        tips_num = np.random.randint(1, 3)  # 从目标语言中抽取的片段数目，最大是3
+        # 修复 Sample larger than population or is negative
+        if tips_num > tips_size:
+            tips_num = tips_size
+        tips_indexs = sorted(random.sample(range(0, tips_size), tips_num)) # 获取片段开始下标
+
+        # 抽取tips
+        tips = []
+        x2_tmp = x2.numpy().tolist()[1:]
+        for index in tips_indexs:
+            tips.extend(x2_tmp[index*tips_len:(index+1)*tips_len])
+        tips = torch.tensor(tips)
+        tips = tips.transpose(0, 1)
+        tips = tips.numpy().tolist()
+
+        # 现在把tips插入x1句子的末尾
+        x1_tips = x1.transpose(0, 1)
+        x1_tips = x1_tips.numpy().tolist()
+        len1_tmp = (len1 - 1).numpy().tolist()
+        for i, l in enumerate(len1_tmp):
+            x1_tips[i][l:l] =tips[i]
+
+        x1_tips = torch.tensor(x1_tips)
+        x1 = x1_tips.transpose(0, 1)
+        len1_wo_tips = len1 # 保存原始x1数据长度
+        len1 = len1 + tips_num * tips_len   # 更新添加tips后的长度
+
         langs1 = x1.clone().fill_(lang1_id)
         langs2 = x2.clone().fill_(lang2_id)
-        bs = len(len1)  # update 
-
 
         # target words to predict
         alen = torch.arange(len2.max(), dtype=torch.long, device=len2.device)
@@ -1274,6 +1310,11 @@ class EncDecTrainer(Trainer):
         x1 = x1.transpose(0, 1)
         x1 = x1[pred_mask.unsqueeze(-1).expand_as(x1)].view(-1, x1.size()[-1])
 
+        # 使attn_dist仅作用于提示性文本tips
+        len1_wo_tips = len1_wo_tips.numpy().tolist()
+        for i, l in enumerate(len1_wo_tips):
+            attn_dist[i][:, :(l-1)] = 0
+            attn_dist[i][:, l + tips_num * tips_len - 1] = 0 # 最后一个/s，结束字符为0
         attn_dist = attn_dist.transpose(0, 1)
         attn_dist = attn_dist[pred_mask.unsqueeze(-1).expand_as(attn_dist)].view(-1, attn_dist.size()[-1])
 
